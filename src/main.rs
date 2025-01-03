@@ -1,8 +1,8 @@
 #[macro_use]
 extern crate rocket;
 
-use uuid::Uuid;
 use std::env;
+use uuid::Uuid;
 
 use mysql_async::{prelude::*, Opts, Pool};
 use rocket::serde::json::Json;
@@ -39,6 +39,18 @@ fn move_to_bitmap(move_notation: &str) -> Result<u64, &str> {
     Ok(move_bit)
 }
 
+fn move_to_algebraic(move_bit: u64) -> Option<String> {
+    if move_bit.count_ones() != 1 {
+        return None;
+    }
+
+    let pos = move_bit.trailing_zeros() as usize;
+    let file = (pos % 8) as u8 + b'a';
+    let rank = (pos / 8) as u8 + b'1';
+
+    Some(format!("{}{}", file as char, rank as char))
+}
+
 fn random_upto(n: usize) -> usize {
     assert!(n > 0, "Input must be greater than zero");
     let mut rng = rand::thread_rng();
@@ -54,6 +66,40 @@ async fn get_game(pool: &State<Pool>, game_uuid: String) -> Game {
         },
     ).await.unwrap().map(|(black_uuid, white_uuid, position_black, position_white, state)| Game{ black_uuid, white_uuid, position_black, position_white, state });
     game.unwrap()
+}
+
+async fn get_max_move_no(pool: &State<Pool>, game_uuid: String) -> u64 {
+    let mut conn = pool.get_conn().await.unwrap();
+    let max_move_opt: Option<(Option<u64>,)> = conn.exec_first(
+        "SELECT MAX(move_number) AS move_number FROM moves WHERE game_uuid = UUID_TO_BIN(:game_uuid)",
+        params! {
+            "game_uuid" => &game_uuid,
+        },
+    )
+    .await
+    .unwrap();
+    let max_move: u64 = max_move_opt
+        .and_then(|row| row.0) // Extract and flatten the inner Option<u64>
+        .unwrap_or(0);
+    max_move
+}
+
+async fn get_last_move(pool: &State<Pool>, game_uuid: String) -> String {
+    let mut conn = pool.get_conn().await.unwrap();
+    let last_move_opt: Option<(Option<u64>,)> = conn.exec_first(
+        "SELECT move_position FROM moves WHERE game_uuid = UUID_TO_BIN(:game_uuid) ORDER BY move_number DESC LIMIT 1;",
+        params! {
+            "game_uuid" => &game_uuid,
+        },
+    ).await.unwrap();
+    let last_move: u64 = last_move_opt.and_then(|row| row.0).unwrap_or(0);
+    if last_move == 0 {
+        return String::new();
+    } else if last_move == u64::MAX {
+        return "pass".to_string();
+    } else {
+        return move_to_algebraic(last_move).unwrap();
+    }
 }
 
 fn apply_move(
@@ -333,6 +379,8 @@ async fn game_status(pool: &State<Pool>, request: Json<GameRequest>) -> Json<Gam
         "white_won".to_string(),
     ];
 
+    let last_move: String = get_last_move(pool, request.game_id.clone()).await;
+
     let game: Option<GameStatusResult> = conn
         .exec_first(
             "select state as status from games where game_uuid = uuid_to_bin(:game_uuid)",
@@ -344,6 +392,7 @@ async fn game_status(pool: &State<Pool>, request: Json<GameRequest>) -> Json<Gam
         .unwrap()
         .map(|status: u64| GameStatusResult {
             status: statuses[status as usize].clone(),
+            last_move: last_move,
         });
 
     let response: GameStatusResponse = GameStatusResponse {
@@ -437,11 +486,6 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
 
     if request.r#move == "pass".to_string() {
         let next_state: u64 = 3 - game.state;
-        let next_player = if next_state == 2 {
-            "black".to_string()
-        } else {
-            "white".to_string()
-        };
         conn.exec_drop(
             "UPDATE games set end_date = NOW(), state = :new_state WHERE game_uuid = UUID_TO_BIN(:game_uuid)",
             params! {
@@ -449,10 +493,23 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
                 "new_state" => next_state,
             }
         ).await.unwrap();
+        let max_move: u64 = get_max_move_no(pool, request.game_id.clone()).await;
+
+        conn.exec_drop(
+            "INSERT INTO moves (game_uuid, move_number, move_position, position_black, position_white, move_date) VALUES (UUID_TO_BIN(:game_uuid), :move_number, :next_move, :position_black, :position_white, now())",
+            params! {
+                "game_uuid" => request.game_id.clone(),
+                "next_move" => u64::MAX,
+                "move_number" => max_move + 1,
+                "position_black" => game.position_black,
+                "position_white" => game.position_white,
+            },
+        ).await.unwrap();
+
         let result: MoveResult = MoveResult {
             ok: true,
             r#continue: true,
-            winner: next_player.clone(),
+            winner: String::new(),
         };
         let response: MoveResponse = MoveResponse {
             status: "ok".to_string(),
@@ -497,17 +554,7 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
                     "new_state" => next_state
                 }
             ).await.unwrap();
-            let max_move_opt: Option<(Option<u64>,)> = conn.exec_first(
-                "SELECT MAX(move_number) AS move_number FROM moves WHERE game_uuid = UUID_TO_BIN(:game_uuid)",
-                params! {
-                    "game_uuid" => request.game_id.clone(),
-                },
-            )
-            .await
-            .unwrap();
-            let max_move: u64 = max_move_opt
-                .and_then(|row| row.0) // Extract and flatten the inner Option<u64>
-                .unwrap_or(0);
+            let max_move: u64 = get_max_move_no(pool, request.game_id.clone()).await;
 
             conn.exec_drop(
                 "INSERT INTO moves (game_uuid, move_number, move_position, position_black, position_white, move_date) VALUES (UUID_TO_BIN(:game_uuid), :move_number, :next_move, :position_black, :position_white, now())",

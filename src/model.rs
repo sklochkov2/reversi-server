@@ -66,6 +66,7 @@ pub struct GameStatusResponse {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct GameStatusResult {
     pub status: String,
+    pub last_move: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
