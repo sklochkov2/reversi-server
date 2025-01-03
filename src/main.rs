@@ -1,18 +1,16 @@
 #[macro_use]
 extern crate rocket;
 
-//use rocket::{http::Status, local::asynchronous::Client};
 use uuid::Uuid;
-//use dotenv::dotenv;
 use std::env;
 
-use rocket::serde::{json::Json};
+use mysql_async::{prelude::*, Opts, Pool};
+use rocket::serde::json::Json;
 use rocket::State;
-use mysql_async::{prelude::*, Pool, Opts};
 
 mod model;
 use model::*;
-
+use rand::Rng;
 
 struct Game {
     black_uuid: String,
@@ -22,11 +20,9 @@ struct Game {
     state: u64,
 }
 
-
 pub fn generate_uuid() -> String {
     Uuid::new_v4().to_string()
 }
-
 
 fn move_to_bitmap(move_notation: &str) -> Result<u64, &str> {
     if move_notation.len() != 2 {
@@ -43,10 +39,16 @@ fn move_to_bitmap(move_notation: &str) -> Result<u64, &str> {
     Ok(move_bit)
 }
 
+fn random_upto(n: usize) -> usize {
+    assert!(n > 0, "Input must be greater than zero");
+    let mut rng = rand::thread_rng();
+    rng.gen_range(0..n)
+}
+
 async fn get_game(pool: &State<Pool>, game_uuid: String) -> Game {
     let mut conn = pool.get_conn().await.unwrap();
     let game: Option<Game> = conn.exec_first(
-        "select BIN_TO_UUID(black_uuid) as black_uuid, BIN_TO_UUID(white_uuid) as white_uuid, position_black, position_white, state from games where game_uuid = UUID_TO_BIN(:game_uuid)",
+        "select IFNULL(BIN_TO_UUID(black_uuid), '') as black_uuid, IFNULL(BIN_TO_UUID(white_uuid), '') as white_uuid, position_black, position_white, state from games where game_uuid = UUID_TO_BIN(:game_uuid)",
         params!{
             "game_uuid" => &game_uuid,
         },
@@ -58,12 +60,17 @@ fn apply_move(
     white: u64,
     black: u64,
     move_notation: &str,
-    is_white_move: bool
+    is_white_move: bool,
 ) -> Result<(u64, u64), &'static str> {
     const DIRECTIONS: [(i32, i32); 8] = [
-        (-1, -1), (-1, 0), (-1, 1),
-        (0, -1),         (0, 1),
-        (1, -1),  (1, 0),  (1, 1),
+        (-1, -1),
+        (-1, 0),
+        (-1, 1),
+        (0, -1),
+        (0, 1),
+        (1, -1),
+        (1, 0),
+        (1, 1),
     ];
 
     // Convert algebraic notation to position index
@@ -79,7 +86,11 @@ fn apply_move(
     let move_pos = rank * 8 + file;
     let move_bit = 1u64 << move_pos;
 
-    let (mut player, mut opponent) = if is_white_move { (white, black) } else { (black, white) };
+    let (mut player, mut opponent) = if is_white_move {
+        (white, black)
+    } else {
+        (black, white)
+    };
 
     if (player | opponent) & move_bit != 0 {
         return Err("Square already occupied");
@@ -162,9 +173,14 @@ fn check_game_status(player: u64, opponent: u64) -> &'static str {
 
 fn has_valid_moves(player: u64, opponent: u64) -> bool {
     const DIRECTIONS: [(i32, i32); 8] = [
-        (-1, -1), (-1, 0), (-1, 1),
-        (0, -1),         (0, 1),
-        (1, -1),  (1, 0),  (1, 1),
+        (-1, -1),
+        (-1, 0),
+        (-1, 1),
+        (0, -1),
+        (0, 1),
+        (1, -1),
+        (1, 0),
+        (1, 1),
     ];
 
     for pos in 0..64 {
@@ -206,44 +222,68 @@ fn has_valid_moves(player: u64, opponent: u64) -> bool {
 #[get("/players")]
 async fn get_users(pool: &State<Pool>) -> Json<PlayerResponse> {
     let mut conn = pool.get_conn().await.unwrap();
-    
+
     let users: Vec<User> = conn
         .query_map(
             "SELECT bin_to_uuid(player_uuid) as player_uuid, comment FROM players",
-            |(player_uuid, comment)| User { player_uuid, comment },
+            |(player_uuid, comment)| User {
+                player_uuid,
+                comment,
+            },
         )
         .await
         .unwrap();
 
     let response: PlayerResponse = PlayerResponse {
         status: "ok".to_string(),
-        error: ResponseError{code:200, message: "".to_string()},
-        result: users
+        error: ResponseError {
+            code: 200,
+            message: "".to_string(),
+        },
+        result: users,
     };
-    
+
     Json(response)
 }
 
 #[post("/create_game", format = "json", data = "<request>")]
 async fn create_game(pool: &State<Pool>, request: Json<NewGameRequest>) -> Json<NewGameResponse> {
     // TODO(1): add player validation
-    // TODO(2): select player color randomly
+    println!("Game creation requested by {}", request.player_id.clone());
+
+    let upto: usize = 2;
 
     let mut conn = pool.get_conn().await.unwrap();
     let game_uuid: String = generate_uuid();
+    let mut query = "INSERT INTO games(game_uuid, black_uuid, state, position_black, position_white, start_date) VALUES (UUID_TO_BIN(:game_uuid), UUID_TO_BIN(:player_uuid), 0, :initial_black, :initial_white, NOW())";
+    let mut color = "black".to_string();
+    if random_upto(upto) == 1 {
+        query = "INSERT INTO games(game_uuid, white_uuid, state, position_black, position_white, start_date) VALUES (UUID_TO_BIN(:game_uuid), UUID_TO_BIN(:player_uuid), 0, :initial_black, :initial_white, NOW())";
+        color = "white".to_string();
+    }
     conn.exec_drop(
-        "INSERT INTO games(game_uuid, black_uuid, state, position_black, position_white, start_date) VALUES (UUID_TO_BIN(:game_uuid), UUID_TO_BIN(:player_uuid), 0, :initial_black, :initial_white, NOW())",
+        query,
         params! {
             "game_uuid" => game_uuid.clone(),
             "player_uuid" => request.player_id.clone(),
             "initial_white" => 0x0000001008000000u64,
             "initial_black" => 0x0000000810000000u64,
-        }
-    ).await.unwrap();
-    let response: NewGameResponse = NewGameResponse{
+        },
+    )
+    .await
+    .unwrap();
+    let created_game = get_game(pool, game_uuid.clone()).await;
+    println!("New game properties: black_uuid: >{}<, white_uuid: >{}<, black_position: >{}<, white_position: >{}<, state: >{}<", created_game.black_uuid, created_game.white_uuid, created_game.position_black, created_game.position_white, created_game.state);
+    let response: NewGameResponse = NewGameResponse {
         status: "ok".to_string(),
-        error: ResponseError{code:200, message: "".to_string()},
-        result: NewGameResult{game_id: game_uuid, color: "black".to_string()}
+        error: ResponseError {
+            code: 200,
+            message: "".to_string(),
+        },
+        result: NewGameResult {
+            game_id: game_uuid,
+            color: color,
+        },
     };
     Json(response)
 }
@@ -252,26 +292,34 @@ async fn create_game(pool: &State<Pool>, request: Json<NewGameRequest>) -> Json<
 async fn game_list(pool: &State<Pool>, request: Json<NewGameRequest>) -> Json<GameListResponse> {
     // TODO(1): add player validation
     let mut conn = pool.get_conn().await.unwrap();
-    let games: Vec<AvailableGame> = conn.exec_map(
-        "SELECT
+    let games: Vec<AvailableGame> = conn
+        .exec_map(
+            "SELECT
           bin_to_uuid(game_uuid) as game_id,
           bin_to_uuid(black_uuid) as first_player
          FROM games 
          WHERE state = 0 
           AND black_uuid != uuid_to_bin(?)
          ORDER BY start_date ASC",
-        (request.player_id.clone(),),
-        |(game_id, first_player)| AvailableGame { game_id, first_player },
-    ).await.unwrap();
+            (request.player_id.clone(),),
+            |(game_id, first_player)| AvailableGame {
+                game_id,
+                first_player,
+            },
+        )
+        .await
+        .unwrap();
 
-    let response: GameListResponse = GameListResponse{
+    let response: GameListResponse = GameListResponse {
         status: "ok".to_string(),
-        error: ResponseError{code:200, message: "".to_string()},
-        result: games
+        error: ResponseError {
+            code: 200,
+            message: "".to_string(),
+        },
+        result: games,
     };
     Json(response)
 }
-
 
 #[post("/game_status", format = "json", data = "<request>")]
 async fn game_status(pool: &State<Pool>, request: Json<GameRequest>) -> Json<GameStatusResponse> {
@@ -285,17 +333,26 @@ async fn game_status(pool: &State<Pool>, request: Json<GameRequest>) -> Json<Gam
         "white_won".to_string(),
     ];
 
-    let game: Option<GameStatusResult> = conn.exec_first(
-        "select state as status from games where game_uuid = uuid_to_bin(:game_uuid)",
-        params!{
-            "game_uuid" => &request.game_id,
-        },
-    ).await.unwrap().map(|status: u64| GameStatusResult{ status: statuses[status as usize].clone() });
+    let game: Option<GameStatusResult> = conn
+        .exec_first(
+            "select state as status from games where game_uuid = uuid_to_bin(:game_uuid)",
+            params! {
+                "game_uuid" => &request.game_id,
+            },
+        )
+        .await
+        .unwrap()
+        .map(|status: u64| GameStatusResult {
+            status: statuses[status as usize].clone(),
+        });
 
-    let response: GameStatusResponse = GameStatusResponse{
+    let response: GameStatusResponse = GameStatusResponse {
         status: "ok".to_string(),
-        error: ResponseError{code:200, message: "".to_string()},
-        result: game.unwrap()
+        error: ResponseError {
+            code: 200,
+            message: "".to_string(),
+        },
+        result: game.unwrap(),
     };
     Json(response)
 }
@@ -303,29 +360,39 @@ async fn game_status(pool: &State<Pool>, request: Json<GameRequest>) -> Json<Gam
 #[post("/join", format = "json", data = "<request>")]
 async fn game_join(pool: &State<Pool>, request: Json<GameRequest>) -> Json<GameJoinResponse> {
     // TODO(1): add player validation
-    // TODO(2): select player color randomly
     // TODO(3): make sure the joining player is different from the game creator
     // TODO(4): make sure the game is in pending state
     let mut conn = pool.get_conn().await.unwrap();
+    let game = get_game(pool, request.game_id.clone()).await;
+    let mut query = "UPDATE games SET white_uuid = uuid_to_bin(:player_uuid), state = 1 where game_uuid = uuid_to_bin(:game_uuid)";
+    let mut color = "white".to_string();
+    if game.black_uuid == "".to_string() {
+        query = "UPDATE games SET black_uuid = uuid_to_bin(:player_uuid), state = 1 where game_uuid = uuid_to_bin(:game_uuid)";
+        color = "black".to_string();
+    }
     conn.exec_drop(
-        "UPDATE games SET white_uuid = uuid_to_bin(:player_uuid), state = 1 where game_uuid = uuid_to_bin(:game_uuid)",
+        query,
         params! {
             "player_uuid" => request.player_id.clone(),
             "game_uuid" => request.game_id.clone(),
-        }
-    ).await.unwrap();
-    let result: GameJoinResult = GameJoinResult{
+        },
+    )
+    .await
+    .unwrap();
+    let result: GameJoinResult = GameJoinResult {
         result: true,
-        color: "white".to_string(),
+        color: color,
     };
-    let response: GameJoinResponse = GameJoinResponse{
+    let response: GameJoinResponse = GameJoinResponse {
         status: "ok".to_string(),
-        error: ResponseError{code:200, message: "".to_string()},
-        result: result
+        error: ResponseError {
+            code: 200,
+            message: "".to_string(),
+        },
+        result: result,
     };
     Json(response)
 }
-
 
 #[post("/move", format = "json", data = "<request>")]
 async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveResponse> {
@@ -352,21 +419,58 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
                 "new_state" => next_state,
             }
         ).await.unwrap();
-        let result: MoveResult = MoveResult{
+        let result: MoveResult = MoveResult {
             ok: true,
             r#continue: false,
             winner: next_player.clone(),
         };
-        let response: MoveResponse = MoveResponse{
+        let response: MoveResponse = MoveResponse {
             status: "ok".to_string(),
-            error: ResponseError{code:200, message: String::new()},
-            result: result
+            error: ResponseError {
+                code: 200,
+                message: String::new(),
+            },
+            result: result,
         };
         return Json(response);
-
     }
 
-    match apply_move(game.position_white, game.position_black, &request.r#move.clone().as_str(), curr_player == "white".to_string()) {
+    if request.r#move == "pass".to_string() {
+        let next_state: u64 = 3 - game.state;
+        let next_player = if next_state == 2 {
+            "black".to_string()
+        } else {
+            "white".to_string()
+        };
+        conn.exec_drop(
+            "UPDATE games set end_date = NOW(), state = :new_state WHERE game_uuid = UUID_TO_BIN(:game_uuid)",
+            params! {
+                "game_uuid" => request.game_id.clone(),
+                "new_state" => next_state,
+            }
+        ).await.unwrap();
+        let result: MoveResult = MoveResult {
+            ok: true,
+            r#continue: true,
+            winner: next_player.clone(),
+        };
+        let response: MoveResponse = MoveResponse {
+            status: "ok".to_string(),
+            error: ResponseError {
+                code: 200,
+                message: String::new(),
+            },
+            result: result,
+        };
+        return Json(response);
+    }
+
+    match apply_move(
+        game.position_white,
+        game.position_black,
+        &request.r#move.clone().as_str(),
+        curr_player == "white".to_string(),
+    ) {
         Ok((new_white, new_black)) => {
             let mut next_state: u64 = 2;
             let mut cont: bool = true;
@@ -401,7 +505,8 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
             )
             .await
             .unwrap();
-            let max_move: u64 = max_move_opt.and_then(|row| row.0) // Extract and flatten the inner Option<u64>
+            let max_move: u64 = max_move_opt
+                .and_then(|row| row.0) // Extract and flatten the inner Option<u64>
                 .unwrap_or(0);
 
             conn.exec_drop(
@@ -414,47 +519,63 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
                     "position_white" => new_white,
                 },
             ).await.unwrap();
-            let result: MoveResult = MoveResult{
+            let result: MoveResult = MoveResult {
                 ok: true,
                 r#continue: cont,
                 winner: String::new(),
             };
-            let response: MoveResponse = MoveResponse{
+            let response: MoveResponse = MoveResponse {
                 status: "ok".to_string(),
-                error: ResponseError{code:200, message: String::new()},
-                result: result
+                error: ResponseError {
+                    code: 200,
+                    message: String::new(),
+                },
+                result: result,
             };
             return Json(response);
         }
         Err(e) => {
-            let result: MoveResult = MoveResult{
+            let result: MoveResult = MoveResult {
                 ok: false,
                 r#continue: true,
                 winner: String::new(),
             };
-            let response: MoveResponse = MoveResponse{
+            let response: MoveResponse = MoveResponse {
                 status: "error".to_string(),
-                error: ResponseError{code:400, message: e.to_string()},
-                result: result
+                error: ResponseError {
+                    code: 400,
+                    message: e.to_string(),
+                },
+                result: result,
             };
             return Json(response);
         }
     }
 }
 
-
 #[rocket::main]
 async fn main() {
     dotenv::dotenv().ok(); // Optional: Load from .env file
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    env_logger::init();
 
     let opts = Opts::from_url(&database_url).expect("Invalid DATABASE_URL");
-    
+
     let pool = Pool::new(opts);
 
     rocket::build()
         .manage(pool)
-        .mount("/reversi/v1", routes![get_users, create_game, game_list, game_status, game_join, game_move])
+        .mount(
+            "/reversi/v1",
+            routes![
+                get_users,
+                create_game,
+                game_list,
+                game_status,
+                game_join,
+                game_move
+            ],
+        )
         .launch()
         .await
         .unwrap();
@@ -463,17 +584,20 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rocket::{http::Status, local::asynchronous::Client};
-    use mysql_async::{Pool, OptsBuilder};
-    use serde_json::json;
-    use uuid::Uuid;
     use dotenv::dotenv;
+    use mysql_async::{OptsBuilder, Pool};
+    use rocket::{http::Status, local::asynchronous::Client};
+    use serde_json::json;
     use std::env;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn test_generate_uuid() {
         let uuid = generate_uuid(); // Use the function directly, no `super` needed.
-        assert!(Uuid::parse_str(&uuid).is_ok(), "Generated UUID is not valid");
+        assert!(
+            Uuid::parse_str(&uuid).is_ok(),
+            "Generated UUID is not valid"
+        );
     }
 
     async fn test_get_users() {

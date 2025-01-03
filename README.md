@@ -31,4 +31,3 @@ The basic response structure looks like the following:
 
 * Implement tokio HTTP configuration loading from environment variables.
 * Implement request parameter validation.
-* Implement random color selection.

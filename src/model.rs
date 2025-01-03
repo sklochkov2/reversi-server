@@ -6,14 +6,12 @@ pub struct ResponseError {
     pub message: String,
 }
 
-
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PlayerResponse {
     pub status: String,
     pub error: ResponseError,
-    pub result: Vec<User>
+    pub result: Vec<User>,
 }
-
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct User {
@@ -23,7 +21,7 @@ pub struct User {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct NewGameRequest {
-    pub player_id: String
+    pub player_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -36,7 +34,7 @@ pub struct GameRequest {
 pub struct NewGameResponse {
     pub status: String,
     pub error: ResponseError,
-    pub result: NewGameResult
+    pub result: NewGameResult,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -80,7 +78,7 @@ pub struct GameJoinResponse {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct GameJoinResult {
     pub result: bool,
-    pub color: String
+    pub color: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
