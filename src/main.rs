@@ -187,6 +187,13 @@ fn apply_move(
 
 fn check_game_status(player: u64, opponent: u64) -> &'static str {
     let all_discs = player | opponent;
+    println!(
+        "Checking status; white: {}, black: {}, white count: {}, black count: {}",
+        player,
+        opponent,
+        player.count_ones(),
+        opponent.count_ones()
+    );
 
     if all_discs == 0xFFFFFFFFFFFFFFFF {
         let player_count = player.count_ones();
@@ -342,10 +349,9 @@ async fn game_list(pool: &State<Pool>, request: Json<NewGameRequest>) -> Json<Ga
         .exec_map(
             "SELECT
           bin_to_uuid(game_uuid) as game_id,
-          bin_to_uuid(black_uuid) as first_player
+          IFNULL(bin_to_uuid(black_uuid), bin_to_uuid(white_uuid)) as first_player
          FROM games 
-         WHERE state = 0 
-          AND black_uuid != uuid_to_bin(?)
+         WHERE state = 0 AND IFNULL(bin_to_uuid(black_uuid), bin_to_uuid(white_uuid)) <> ?
          ORDER BY start_date ASC",
             (request.player_id.clone(),),
             |(game_id, first_player)| AvailableGame {
@@ -377,6 +383,7 @@ async fn game_status(pool: &State<Pool>, request: Json<GameRequest>) -> Json<Gam
         "white".to_string(),
         "black_won".to_string(),
         "white_won".to_string(),
+        "draw".to_string(),
     ];
 
     let last_move: String = get_last_move(pool, request.game_id.clone()).await;
@@ -485,14 +492,24 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
     }
 
     if request.r#move == "pass".to_string() {
-        let next_state: u64 = 3 - game.state;
-        conn.exec_drop(
-            "UPDATE games set end_date = NOW(), state = :new_state WHERE game_uuid = UUID_TO_BIN(:game_uuid)",
-            params! {
-                "game_uuid" => request.game_id.clone(),
-                "new_state" => next_state,
-            }
-        ).await.unwrap();
+        let mut next_state: u64 = 3 - game.state;
+        let mut cont: bool = true;
+        let mut winner: String = String::new();
+        let game_status: &str = check_game_status(game.position_white, game.position_black);
+
+        if game_status == "white" {
+            next_state = 4;
+            cont = false;
+            winner = "white".to_string();
+        } else if game_status == "black" {
+            next_state = 3;
+            cont = false;
+            winner = "black".to_string();
+        } else if game_status == "draw" {
+            next_state = 5;
+            cont = false;
+            winner = "draw".to_string();
+        }
         let max_move: u64 = get_max_move_no(pool, request.game_id.clone()).await;
 
         conn.exec_drop(
@@ -506,10 +523,30 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
             },
         ).await.unwrap();
 
+        conn.exec_drop(
+            "UPDATE games set end_date = NOW(), state = :new_state WHERE game_uuid = UUID_TO_BIN(:game_uuid)",
+            params! {
+                "game_uuid" => request.game_id.clone(),
+                "new_state" => next_state,
+            }
+        ).await.unwrap();
+        /*let max_move: u64 = get_max_move_no(pool, request.game_id.clone()).await;
+
+        conn.exec_drop(
+            "INSERT INTO moves (game_uuid, move_number, move_position, position_black, position_white, move_date) VALUES (UUID_TO_BIN(:game_uuid), :move_number, :next_move, :position_black, :position_white, now())",
+            params! {
+                "game_uuid" => request.game_id.clone(),
+                "next_move" => u64::MAX,
+                "move_number" => max_move + 1,
+                "position_black" => game.position_black,
+                "position_white" => game.position_white,
+            },
+        ).await.unwrap();*/
+
         let result: MoveResult = MoveResult {
             ok: true,
-            r#continue: true,
-            winner: String::new(),
+            r#continue: cont,
+            winner: winner,
         };
         let response: MoveResponse = MoveResponse {
             status: "ok".to_string(),
@@ -545,6 +582,18 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
                 next_state = 5;
                 cont = false;
             }
+            let max_move: u64 = get_max_move_no(pool, request.game_id.clone()).await;
+
+            let move_insert_res = conn.exec_drop(
+                "INSERT INTO moves (game_uuid, move_number, move_position, position_black, position_white, move_date) VALUES (UUID_TO_BIN(:game_uuid), :move_number, :next_move, :position_black, :position_white, now())",
+                params! {
+                    "game_uuid" => request.game_id.clone(),
+                    "next_move" => move_to_bitmap(&request.r#move.clone().as_str()).unwrap(),
+                    "move_number" => max_move + 1,
+                    "position_black" => new_black,
+                    "position_white" => new_white,
+                },
+            ).await;
             conn.exec_drop(
                 "UPDATE games set position_black = :black_pos, position_white = :white_pos, end_date = NOW(), state = :new_state WHERE game_uuid = UUID_TO_BIN(:game_uuid)",
                 params! {
@@ -554,9 +603,9 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
                     "new_state" => next_state
                 }
             ).await.unwrap();
-            let max_move: u64 = get_max_move_no(pool, request.game_id.clone()).await;
+            /*let max_move: u64 = get_max_move_no(pool, request.game_id.clone()).await;
 
-            conn.exec_drop(
+            let move_insert_res = conn.exec_drop(
                 "INSERT INTO moves (game_uuid, move_number, move_position, position_black, position_white, move_date) VALUES (UUID_TO_BIN(:game_uuid), :move_number, :next_move, :position_black, :position_white, now())",
                 params! {
                     "game_uuid" => request.game_id.clone(),
@@ -565,7 +614,18 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
                     "position_black" => new_black,
                     "position_white" => new_white,
                 },
-            ).await.unwrap();
+            ).await;*/
+            match move_insert_res {
+                Ok(_) => {}
+                Err(e) => {
+                    println!(
+                        "Failed to insert move {} / {}: error {}",
+                        request.r#move.clone(),
+                        max_move + 1,
+                        e
+                    );
+                }
+            }
             let result: MoveResult = MoveResult {
                 ok: true,
                 r#continue: cont,
