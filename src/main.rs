@@ -7,6 +7,7 @@ use uuid::Uuid;
 use mysql_async::{prelude::*, Opts, Pool, TxOpts};
 use rocket::serde::json::Json;
 use rocket::State;
+use reversi_tools::position::*;
 
 mod model;
 use model::*;
@@ -22,33 +23,6 @@ struct Game {
 
 pub fn generate_uuid() -> String {
     Uuid::new_v4().to_string()
-}
-
-fn move_to_bitmap(move_notation: &str) -> Result<u64, &str> {
-    if move_notation.len() != 2 {
-        return Err("Invalid move notation");
-    }
-    let file = move_notation.chars().next().unwrap().to_ascii_lowercase() as usize - 'a' as usize;
-    let rank = move_notation.chars().nth(1).unwrap().to_digit(10).unwrap() as usize - 1;
-    if file >= 8 || rank >= 8 {
-        return Err("Invalid move notation");
-    }
-
-    let move_pos = rank * 8 + file;
-    let move_bit = 1u64 << move_pos;
-    Ok(move_bit)
-}
-
-fn move_to_algebraic(move_bit: u64) -> Option<String> {
-    if move_bit.count_ones() != 1 {
-        return None;
-    }
-
-    let pos = move_bit.trailing_zeros() as usize;
-    let file = (pos % 8) as u8 + b'a';
-    let rank = (pos / 8) as u8 + b'1';
-
-    Some(format!("{}{}", file as char, rank as char))
 }
 
 fn random_upto(n: usize) -> usize {
@@ -101,176 +75,6 @@ async fn get_last_move(pool: &State<Pool>, game_uuid: String) -> String {
     } else {
         return move_to_algebraic(last_move).unwrap();
     }
-}
-
-fn apply_move(
-    white: u64,
-    black: u64,
-    move_notation: &str,
-    is_white_move: bool,
-) -> Result<(u64, u64), &'static str> {
-    const DIRECTIONS: [(i32, i32); 8] = [
-        (-1, -1),
-        (-1, 0),
-        (-1, 1),
-        (0, -1),
-        (0, 1),
-        (1, -1),
-        (1, 0),
-        (1, 1),
-    ];
-
-    // Convert algebraic notation to position index
-    if move_notation.len() != 2 {
-        return Err("Invalid move notation");
-    }
-    let file = move_notation.chars().next().unwrap().to_ascii_lowercase() as usize - 'a' as usize;
-    let rank = move_notation.chars().nth(1).unwrap().to_digit(10).unwrap() as usize - 1;
-    if file >= 8 || rank >= 8 {
-        return Err("Invalid move notation");
-    }
-
-    let move_pos = rank * 8 + file;
-    let move_bit = 1u64 << move_pos;
-
-    let (mut player, mut opponent) = if is_white_move {
-        (white, black)
-    } else {
-        (black, white)
-    };
-
-    if (player | opponent) & move_bit != 0 {
-        return Err("Square already occupied");
-    }
-
-    let mut flips = 0u64;
-
-    for &(dx, dy) in DIRECTIONS.iter() {
-        let mut current_flips = 0u64;
-        let mut x = file as i32 + dx;
-        let mut y = rank as i32 + dy;
-        let mut found_opponent = false;
-
-        while x >= 0 && x < 8 && y >= 0 && y < 8 {
-            let index = (y * 8 + x) as usize;
-            let bit = 1u64 << index;
-
-            if (opponent & bit) != 0 {
-                current_flips |= bit;
-                found_opponent = true;
-            } else if (player & bit) != 0 {
-                if found_opponent {
-                    flips |= current_flips;
-                }
-                break;
-            } else {
-                break;
-            }
-
-            x += dx;
-            y += dy;
-        }
-    }
-
-    if flips == 0 {
-        return Err("Invalid move, no discs flipped");
-    }
-
-    player |= move_bit | flips;
-    opponent &= !flips;
-
-    if is_white_move {
-        Ok((player, opponent))
-    } else {
-        Ok((opponent, player))
-    }
-}
-
-fn check_game_status(player: u64, opponent: u64) -> &'static str {
-    let all_discs = player | opponent;
-    println!(
-        "Checking status; white: {}, black: {}, white count: {}, black count: {}",
-        player,
-        opponent,
-        player.count_ones(),
-        opponent.count_ones()
-    );
-
-    if all_discs == 0xFFFFFFFFFFFFFFFF {
-        let player_count = player.count_ones();
-        let opponent_count = opponent.count_ones();
-
-        return if player_count > opponent_count {
-            "white"
-        } else if opponent_count > player_count {
-            "black"
-        } else {
-            "draw"
-        };
-    }
-
-    if has_valid_moves(player, opponent) || has_valid_moves(opponent, player) {
-        "continue"
-    } else {
-        let player_count = player.count_ones();
-        let opponent_count = opponent.count_ones();
-
-        if player_count > opponent_count {
-            "white"
-        } else if opponent_count > player_count {
-            "black"
-        } else {
-            "draw"
-        }
-    }
-}
-
-fn has_valid_moves(player: u64, opponent: u64) -> bool {
-    const DIRECTIONS: [(i32, i32); 8] = [
-        (-1, -1),
-        (-1, 0),
-        (-1, 1),
-        (0, -1),
-        (0, 1),
-        (1, -1),
-        (1, 0),
-        (1, 1),
-    ];
-
-    for pos in 0..64 {
-        let move_bit = 1u64 << pos;
-
-        if (player | opponent) & move_bit != 0 {
-            continue; // Square is already occupied
-        }
-
-        for &(dx, dy) in DIRECTIONS.iter() {
-            let mut x = (pos % 8) as i32 + dx;
-            let mut y = (pos / 8) as i32 + dy;
-            let mut found_opponent = false;
-
-            while x >= 0 && x < 8 && y >= 0 && y < 8 {
-                let index = (y * 8 + x) as usize;
-                let bit = 1u64 << index;
-
-                if (opponent & bit) != 0 {
-                    found_opponent = true;
-                } else if (player & bit) != 0 {
-                    if found_opponent {
-                        return true;
-                    }
-                    break;
-                } else {
-                    break;
-                }
-
-                x += dx;
-                y += dy;
-            }
-        }
-    }
-
-    false
 }
 
 #[get("/players")]
@@ -538,17 +342,18 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
         let mut next_state: u64 = 3 - game.state;
         let mut cont: bool = true;
         let mut winner: String = String::new();
-        let game_status: &str = check_game_status(game.position_white, game.position_black);
+        //let game_status: &str = check_game_status(game.position_white, game.position_black);
+        let game_status = check_game_status(game.position_white, game.position_black, next_state == 2);
 
-        if game_status == "white" {
+        if game_status == (u64::MAX - 2) {
             next_state = 4;
             cont = false;
             winner = "white".to_string();
-        } else if game_status == "black" {
+        } else if game_status == (u64::MAX - 1) {
             next_state = 3;
             cont = false;
             winner = "black".to_string();
-        } else if game_status == "draw" {
+        } else if game_status == (u64::MAX - 3) {
             next_state = 5;
             cont = false;
             winner = "draw".to_string();
@@ -636,7 +441,7 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
     match apply_move(
         game.position_white,
         game.position_black,
-        &request.r#move.clone().as_str(),
+        move_to_bitmap(&request.r#move.clone().as_str()).unwrap(),
         curr_player == "white".to_string(),
     ) {
         Ok((new_white, new_black)) => {
@@ -645,14 +450,15 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
             if curr_player == "white".to_string() {
                 next_state = 1;
             }
-            let game_status: &str = check_game_status(game.position_white, game.position_black);
-            if game_status == "white" {
+            //let game_status: &str = check_game_status(game.position_white, game.position_black);
+            let game_status = check_game_status(game.position_white, game.position_black, curr_player == "white".to_string());
+            if game_status == (u64::MAX - 2) {
                 next_state = 4;
                 cont = false;
-            } else if game_status == "black" {
+            } else if game_status == (u64::MAX - 1) {
                 next_state = 3;
                 cont = false;
-            } else if game_status == "draw" {
+            } else if game_status == (u64::MAX - 3) {
                 next_state = 5;
                 cont = false;
             }
