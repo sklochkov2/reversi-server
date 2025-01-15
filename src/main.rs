@@ -568,13 +568,19 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
 async fn main() {
     dotenv::dotenv().ok(); // Optional: Load from .env file
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|val| val.parse().ok())
+        .unwrap_or(8000);
+    let figment = rocket::Config::figment().merge(("port", port));
     env_logger::init();
 
     let opts = Opts::from_url(&database_url).expect("Invalid DATABASE_URL");
 
     let pool = Pool::new(opts);
 
-    rocket::build()
+    rocket::custom(figment)
         .manage(pool)
         .mount(
             "/reversi/v1",
