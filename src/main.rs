@@ -5,9 +5,9 @@ use std::env;
 use uuid::Uuid;
 
 use mysql_async::{prelude::*, Opts, Pool, TxOpts};
+use reversi_tools::position::*;
 use rocket::serde::json::Json;
 use rocket::State;
-use reversi_tools::position::*;
 
 mod model;
 use model::*;
@@ -343,7 +343,8 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
         let mut cont: bool = true;
         let mut winner: String = String::new();
         //let game_status: &str = check_game_status(game.position_white, game.position_black);
-        let game_status = check_game_status(game.position_white, game.position_black, next_state == 2);
+        let game_status =
+            check_game_status(game.position_white, game.position_black, next_state == 2);
 
         if game_status == (u64::MAX - 2) {
             next_state = 4;
@@ -451,7 +452,11 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
                 next_state = 1;
             }
             //let game_status: &str = check_game_status(game.position_white, game.position_black);
-            let game_status = check_game_status(game.position_white, game.position_black, curr_player == "white".to_string());
+            let game_status = check_game_status(
+                game.position_white,
+                game.position_black,
+                curr_player == "white".to_string(),
+            );
             if game_status == (u64::MAX - 2) {
                 next_state = 4;
                 cont = false;
