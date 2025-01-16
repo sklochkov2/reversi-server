@@ -4,22 +4,17 @@ extern crate rocket;
 use std::env;
 use uuid::Uuid;
 
-use mysql_async::{prelude::*, Opts, Pool, TxOpts};
+use mysql_async::{prelude::*, Opts, Pool};
 use reversi_tools::position::*;
 use rocket::serde::json::Json;
 use rocket::State;
 
+mod repository;
+use repository::game_repository::{GameRepository, MySqlGameRepository};
+
 mod model;
 use model::*;
 use rand::Rng;
-
-struct Game {
-    black_uuid: String,
-    white_uuid: String,
-    position_black: u64,
-    position_white: u64,
-    state: u64,
-}
 
 pub fn generate_uuid() -> String {
     Uuid::new_v4().to_string()
@@ -30,55 +25,9 @@ fn random_upto(n: usize) -> usize {
     rng.gen_range(0..n)
 }
 
-async fn get_game(
-    pool: &State<Pool>,
-    game_uuid: String,
-) -> Result<Option<Game>, mysql_async::Error> {
-    let mut conn = pool.get_conn().await?;
-    let game: Option<Game> = conn.exec_first(
-        "select IFNULL(BIN_TO_UUID(black_uuid), '') as black_uuid, IFNULL(BIN_TO_UUID(white_uuid), '') as white_uuid, position_black, position_white, state from games where game_uuid = UUID_TO_BIN(:game_uuid)",
-        params!{
-            "game_uuid" => &game_uuid,
-        },
-    ).await?.map(|(black_uuid, white_uuid, position_black, position_white, state)| Game{ black_uuid, white_uuid, position_black, position_white, state });
-    Ok(game)
-}
-
-async fn get_max_move_no(pool: &State<Pool>, game_uuid: String) -> Result<u64, mysql_async::Error> {
-    let mut conn = pool.get_conn().await?;
-    let max_move_opt: Option<(Option<u64>,)> = conn.exec_first(
-        "SELECT MAX(move_number) AS move_number FROM moves WHERE game_uuid = UUID_TO_BIN(:game_uuid)",
-        params! {
-            "game_uuid" => &game_uuid,
-        },
-    )
-    .await?;
-    let max_move: u64 = max_move_opt
-        .and_then(|row| row.0) // Extract and flatten the inner Option<u64>
-        .unwrap_or(0);
-    Ok(max_move)
-}
-
-async fn get_last_move(pool: &State<Pool>, game_uuid: String) -> String {
-    let mut conn = pool.get_conn().await.unwrap();
-    let last_move_opt: Option<(Option<u64>,)> = conn.exec_first(
-        "SELECT move_position FROM moves WHERE game_uuid = UUID_TO_BIN(:game_uuid) ORDER BY move_number DESC LIMIT 1;",
-        params! {
-            "game_uuid" => &game_uuid,
-        },
-    ).await.unwrap();
-    let last_move: u64 = last_move_opt.and_then(|row| row.0).unwrap_or(0);
-    if last_move == 0 {
-        return String::new();
-    } else if last_move == u64::MAX {
-        return "pass".to_string();
-    } else {
-        return move_to_algebraic(last_move).unwrap();
-    }
-}
-
 #[get("/players")]
 async fn get_users(pool: &State<Pool>) -> Json<PlayerResponse> {
+    // TODO: implement player repository
     let mut conn = pool.get_conn().await.unwrap();
 
     let users: Vec<User> = conn
@@ -108,29 +57,83 @@ async fn get_users(pool: &State<Pool>) -> Json<PlayerResponse> {
 async fn create_game(pool: &State<Pool>, request: Json<NewGameRequest>) -> Json<NewGameResponse> {
     // TODO(1): add player validation
     println!("Game creation requested by {}", request.player_id.clone());
+    let game_repo = MySqlGameRepository::new(pool.inner().clone());
 
     let upto: usize = 2;
 
-    let mut conn = pool.get_conn().await.unwrap();
+    //let mut conn = pool.get_conn().await.unwrap();
     let game_uuid: String = generate_uuid();
-    let mut query = "INSERT INTO games(game_uuid, black_uuid, state, position_black, position_white, start_date) VALUES (UUID_TO_BIN(:game_uuid), UUID_TO_BIN(:player_uuid), 0, :initial_black, :initial_white, NOW())";
-    let mut color = "black".to_string();
+    let mut game: Game = Game {
+        game_uuid: game_uuid.clone(),
+        black_uuid: String::new(),
+        white_uuid: String::new(),
+        position_black: 0x0000000810000000u64,
+        position_white: 0x0000001008000000u64,
+        state: 0,
+    };
+    let color: String;
     if random_upto(upto) == 1 {
-        query = "INSERT INTO games(game_uuid, white_uuid, state, position_black, position_white, start_date) VALUES (UUID_TO_BIN(:game_uuid), UUID_TO_BIN(:player_uuid), 0, :initial_black, :initial_white, NOW())";
         color = "white".to_string();
+        game.white_uuid = request.player_id.clone();
+    } else {
+        color = "black".to_string();
+        game.black_uuid = request.player_id.clone();
     }
-    conn.exec_drop(
-        query,
-        params! {
-            "game_uuid" => game_uuid.clone(),
-            "player_uuid" => request.player_id.clone(),
-            "initial_white" => 0x0000001008000000u64,
-            "initial_black" => 0x0000000810000000u64,
+
+    match game_repo.create_game(&game).await {
+        Ok(_) => {}
+        Err(e) => {
+            let response: NewGameResponse = NewGameResponse {
+                status: "error".to_string(),
+                error: ResponseError {
+                    code: 500,
+                    message: format!("{}", e),
+                },
+                result: NewGameResult {
+                    game_id: String::new(),
+                    color: String::new(),
+                },
+            };
+            return Json(response);
+        }
+    }
+
+    let created_game: Game;
+    match game_repo.get_game(game_uuid.clone().as_str()).await {
+        Ok(g) => match g {
+            Some(gg) => {
+                created_game = gg;
+            }
+            None => {
+                let response: NewGameResponse = NewGameResponse {
+                    status: "error".to_string(),
+                    error: ResponseError {
+                        code: 404,
+                        message: "Game not found".to_string(),
+                    },
+                    result: NewGameResult {
+                        game_id: String::new(),
+                        color: String::new(),
+                    },
+                };
+                return Json(response);
+            }
         },
-    )
-    .await
-    .unwrap();
-    let created_game = get_game(pool, game_uuid.clone()).await.unwrap().unwrap();
+        Err(e) => {
+            let response: NewGameResponse = NewGameResponse {
+                status: "error".to_string(),
+                error: ResponseError {
+                    code: 500,
+                    message: format!("{}", e),
+                },
+                result: NewGameResult {
+                    game_id: String::new(),
+                    color: String::new(),
+                },
+            };
+            return Json(response);
+        }
+    }
     println!("New game properties: black_uuid: >{}<, white_uuid: >{}<, black_position: >{}<, white_position: >{}<, state: >{}<", created_game.black_uuid, created_game.white_uuid, created_game.position_black, created_game.position_white, created_game.state);
     let response: NewGameResponse = NewGameResponse {
         status: "ok".to_string(),
@@ -181,7 +184,7 @@ async fn game_list(pool: &State<Pool>, request: Json<NewGameRequest>) -> Json<Ga
 #[post("/game_status", format = "json", data = "<request>")]
 async fn game_status(pool: &State<Pool>, request: Json<GameRequest>) -> Json<GameStatusResponse> {
     // TODO(1): add player validation
-    let mut conn = pool.get_conn().await.unwrap();
+    //let mut conn = pool.get_conn().await.unwrap();
     let statuses: Vec<String> = vec![
         "pending".to_string(),
         "black".to_string(),
@@ -190,22 +193,80 @@ async fn game_status(pool: &State<Pool>, request: Json<GameRequest>) -> Json<Gam
         "white_won".to_string(),
         "draw".to_string(),
     ];
+    let game_repo = MySqlGameRepository::new(pool.inner().clone());
 
-    let last_move: String = get_last_move(pool, request.game_id.clone()).await;
+    let last_move: String; // = get_last_move(pool, request.game_id.clone()).await;
+    match game_repo.get_last_move(request.game_id.as_str()).await {
+        Ok(m) => {
+            if m == 0 {
+                //println!("No moves yet!");
+                last_move = String::new();
+            } else if m == u64::MAX {
+                last_move = "pass".to_string();
+            } else {
+                last_move = move_to_algebraic(m).unwrap();
+            }
+        }
+        Err(e) => {
+            println!("Game status error: {}", e);
+            let response: GameStatusResponse = GameStatusResponse {
+                status: "ok".to_string(),
+                error: ResponseError {
+                    code: 500,
+                    message: format!("{}", e),
+                },
+                result: GameStatusResult {
+                    status: String::new(),
+                    last_move: String::new(),
+                },
+            };
+            return Json(response);
+        }
+    }
 
-    let game: Option<GameStatusResult> = conn
-        .exec_first(
-            "select state as status from games where game_uuid = uuid_to_bin(:game_uuid)",
-            params! {
-                "game_uuid" => &request.game_id,
-            },
-        )
-        .await
-        .unwrap()
-        .map(|status: u64| GameStatusResult {
-            status: statuses[status as usize].clone(),
-            last_move: last_move,
-        });
+    let game: Game;
+
+    match game_repo.get_game(request.game_id.as_str()).await {
+        Ok(g) => match g {
+            Some(gg) => {
+                game = gg;
+            }
+            None => {
+                let result: GameStatusResult = GameStatusResult {
+                    status: String::new(),
+                    last_move: String::new(),
+                };
+                let response: GameStatusResponse = GameStatusResponse {
+                    status: "error".to_string(),
+                    error: ResponseError {
+                        code: 404,
+                        message: format!("Game UUID not found"),
+                    },
+                    result: result,
+                };
+                return Json(response);
+            }
+        },
+        Err(e) => {
+            let result: GameStatusResult = GameStatusResult {
+                status: String::new(),
+                last_move: String::new(),
+            };
+            let response: GameStatusResponse = GameStatusResponse {
+                status: "error".to_string(),
+                error: ResponseError {
+                    code: 500,
+                    message: format!("{}", e),
+                },
+                result: result,
+            };
+            return Json(response);
+        }
+    }
+    let result: GameStatusResult = GameStatusResult {
+        status: statuses[game.state as usize].clone(),
+        last_move: last_move,
+    };
 
     let response: GameStatusResponse = GameStatusResponse {
         status: "ok".to_string(),
@@ -213,7 +274,7 @@ async fn game_status(pool: &State<Pool>, request: Json<GameRequest>) -> Json<Gam
             code: 200,
             message: "".to_string(),
         },
-        result: game.unwrap(),
+        result: result,
     };
     Json(response)
 }
@@ -223,11 +284,9 @@ async fn game_join(pool: &State<Pool>, request: Json<GameRequest>) -> Json<GameJ
     // TODO(1): add player validation
     // TODO(3): make sure the joining player is different from the game creator
     // TODO(4): make sure the game is in pending state
-    let mut conn = pool.get_conn().await.unwrap();
-    //let game = get_game(pool, request.game_id.clone()).await.unwrap().unwrap();
-    //
-    let game: Game;
-    match get_game(pool, request.game_id.clone()).await {
+    let game_repo = MySqlGameRepository::new(pool.inner().clone());
+    let mut game: Game;
+    match game_repo.get_game(request.game_id.as_str()).await {
         Ok(g) => match g {
             Some(gg) => {
                 game = gg;
@@ -238,7 +297,7 @@ async fn game_join(pool: &State<Pool>, request: Json<GameRequest>) -> Json<GameJ
                     color: String::new(),
                 };
                 let response: GameJoinResponse = GameJoinResponse {
-                    status: "ok".to_string(),
+                    status: "error".to_string(),
                     error: ResponseError {
                         code: 404,
                         message: format!("Game UUID not found"),
@@ -254,7 +313,7 @@ async fn game_join(pool: &State<Pool>, request: Json<GameRequest>) -> Json<GameJ
                 color: String::new(),
             };
             let response: GameJoinResponse = GameJoinResponse {
-                status: "ok".to_string(),
+                status: "error".to_string(),
                 error: ResponseError {
                     code: 500,
                     message: format!("{}", e),
@@ -264,21 +323,33 @@ async fn game_join(pool: &State<Pool>, request: Json<GameRequest>) -> Json<GameJ
             return Json(response);
         }
     }
-    let mut query = "UPDATE games SET white_uuid = uuid_to_bin(:player_uuid), state = 1 where game_uuid = uuid_to_bin(:game_uuid)";
-    let mut color = "white".to_string();
+    let color: String;
     if game.black_uuid == "".to_string() {
-        query = "UPDATE games SET black_uuid = uuid_to_bin(:player_uuid), state = 1 where game_uuid = uuid_to_bin(:game_uuid)";
         color = "black".to_string();
+        game.black_uuid = request.player_id.clone();
+    } else {
+        color = "white".to_string();
+        game.white_uuid = request.player_id.clone();
     }
-    conn.exec_drop(
-        query,
-        params! {
-            "player_uuid" => request.player_id.clone(),
-            "game_uuid" => request.game_id.clone(),
-        },
-    )
-    .await
-    .unwrap();
+    game.state = 1;
+    match game_repo.update_game(&game).await {
+        Ok(_) => {}
+        Err(e) => {
+            let result: GameJoinResult = GameJoinResult {
+                result: false,
+                color: String::new(),
+            };
+            let response: GameJoinResponse = GameJoinResponse {
+                status: "error".to_string(),
+                error: ResponseError {
+                    code: 500,
+                    message: format!("{}", e),
+                },
+                result: result,
+            };
+            return Json(response);
+        }
+    }
     let result: GameJoinResult = GameJoinResult {
         result: true,
         color: color,
@@ -296,11 +367,48 @@ async fn game_join(pool: &State<Pool>, request: Json<GameRequest>) -> Json<GameJ
 
 #[post("/move", format = "json", data = "<request>")]
 async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveResponse> {
-    let mut conn = pool.get_conn().await.unwrap();
-    let game = get_game(pool, request.game_id.clone())
-        .await
-        .unwrap()
-        .unwrap();
+    let game_repo = MySqlGameRepository::new(pool.inner().clone());
+
+    let mut game: Game;
+    match game_repo.get_game(request.game_id.as_str()).await {
+        Ok(g) => match g {
+            Some(gg) => {
+                game = gg;
+            }
+            None => {
+                let result: MoveResult = MoveResult {
+                    ok: false,
+                    r#continue: true,
+                    winner: String::new(),
+                };
+                let response: MoveResponse = MoveResponse {
+                    status: "error".to_string(),
+                    error: ResponseError {
+                        code: 404,
+                        message: format!("Game UUID not found"),
+                    },
+                    result: result,
+                };
+                return Json(response);
+            }
+        },
+        Err(e) => {
+            let result: MoveResult = MoveResult {
+                ok: false,
+                r#continue: true,
+                winner: String::new(),
+            };
+            let response: MoveResponse = MoveResponse {
+                status: "error".to_string(),
+                error: ResponseError {
+                    code: 500,
+                    message: format!("{}", e),
+                },
+                result: result,
+            };
+            return Json(response);
+        }
+    }
     let mut curr_player: String = "black".to_string();
     if game.white_uuid == request.player_id {
         curr_player = "white".to_string();
@@ -311,17 +419,30 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
     }
 
     if request.r#move == "resign".to_string() {
-        let mut next_state: u64 = 4;
         if curr_player == "white".to_string() {
-            next_state = 3;
+            game.state = 3;
+        } else {
+            game.state = 4;
         }
-        conn.exec_drop(
-            "UPDATE games set end_date = NOW(), state = :new_state WHERE game_uuid = UUID_TO_BIN(:game_uuid)",
-            params! {
-                "game_uuid" => request.game_id.clone(),
-                "new_state" => next_state,
+        match game_repo.update_game(&game).await {
+            Ok(_) => {}
+            Err(e) => {
+                let result: MoveResult = MoveResult {
+                    ok: false,
+                    r#continue: true,
+                    winner: String::new(),
+                };
+                let response: MoveResponse = MoveResponse {
+                    status: "error".to_string(),
+                    error: ResponseError {
+                        code: 500,
+                        message: format!("{}", e),
+                    },
+                    result: result,
+                };
+                return Json(response);
             }
-        ).await.unwrap();
+        }
         let result: MoveResult = MoveResult {
             ok: true,
             r#continue: false,
@@ -339,28 +460,27 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
     }
 
     if request.r#move == "pass".to_string() {
-        let mut next_state: u64 = 3 - game.state;
+        game.state = 3 - game.state;
         let mut cont: bool = true;
         let mut winner: String = String::new();
-        //let game_status: &str = check_game_status(game.position_white, game.position_black);
         let game_status =
-            check_game_status(game.position_white, game.position_black, next_state == 2);
+            check_game_status(game.position_white, game.position_black, game.state == 2);
 
         if game_status == (u64::MAX - 2) {
-            next_state = 4;
+            game.state = 4;
             cont = false;
             winner = "white".to_string();
         } else if game_status == (u64::MAX - 1) {
-            next_state = 3;
+            game.state = 3;
             cont = false;
             winner = "black".to_string();
         } else if game_status == (u64::MAX - 3) {
-            next_state = 5;
+            game.state = 5;
             cont = false;
             winner = "draw".to_string();
         }
         let max_move: u64;
-        match get_max_move_no(pool, request.game_id.clone()).await {
+        match game_repo.get_max_move_no(request.game_id.as_str()).await {
             Ok(m) => {
                 max_move = m;
             }
@@ -382,28 +502,10 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
             }
         }
 
-        let mut tx = conn.start_transaction(TxOpts::default()).await.unwrap();
-
-        tx.exec_drop(
-            "INSERT INTO moves (game_uuid, move_number, move_position, position_black, position_white, move_date) VALUES (UUID_TO_BIN(:game_uuid), :move_number, :next_move, :position_black, :position_white, now())",
-            params! {
-                "game_uuid" => request.game_id.clone(),
-                "next_move" => u64::MAX,
-                "move_number" => max_move + 1,
-                "position_black" => game.position_black,
-                "position_white" => game.position_white,
-            },
-        ).await.unwrap();
-
-        tx.exec_drop(
-            "UPDATE games set end_date = NOW(), state = :new_state WHERE game_uuid = UUID_TO_BIN(:game_uuid)",
-            params! {
-                "game_uuid" => request.game_id.clone(),
-                "new_state" => next_state,
-            }
-        ).await.unwrap();
-
-        match tx.commit().await {
+        match game_repo
+            .update_game_with_move(&game, u64::MAX, max_move + 1)
+            .await
+        {
             Ok(_) => {
                 let result: MoveResult = MoveResult {
                     ok: true,
@@ -427,7 +529,7 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
                     winner: String::new(),
                 };
                 let response: MoveResponse = MoveResponse {
-                    status: "ok".to_string(),
+                    status: "error".to_string(),
                     error: ResponseError {
                         code: 500,
                         message: format!("{}", e),
@@ -446,11 +548,14 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
         curr_player == "white".to_string(),
     ) {
         Ok((new_white, new_black)) => {
-            let mut next_state: u64 = 2;
+            //let mut next_state: u64 = 2;
             let mut cont: bool = true;
-            if curr_player == "white".to_string() {
+            /*if curr_player == "white".to_string() {
                 next_state = 1;
-            }
+            }*/
+            game.position_white = new_white;
+            game.position_black = new_black;
+            game.state = 3 - game.state;
             //let game_status: &str = check_game_status(game.position_white, game.position_black);
             let game_status = check_game_status(
                 game.position_white,
@@ -458,28 +563,30 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
                 curr_player == "white".to_string(),
             );
             if game_status == (u64::MAX - 2) {
-                next_state = 4;
+                game.state = 4;
                 cont = false;
             } else if game_status == (u64::MAX - 1) {
-                next_state = 3;
+                game.state = 3;
                 cont = false;
             } else if game_status == (u64::MAX - 3) {
-                next_state = 5;
+                game.state = 5;
                 cont = false;
             }
             let max_move: u64;
-            match get_max_move_no(pool, request.game_id.clone()).await {
+            //match get_max_move_no(pool, request.game_id.clone()).await {
+            match game_repo.get_max_move_no(request.game_id.as_str()).await {
                 Ok(m) => {
                     max_move = m;
                 }
                 Err(e) => {
+                    println!("Error while getting last move number: {}", e);
                     let result: MoveResult = MoveResult {
                         ok: false,
                         r#continue: true,
                         winner: String::new(),
                     };
                     let response: MoveResponse = MoveResponse {
-                        status: "ok".to_string(),
+                        status: "error".to_string(),
                         error: ResponseError {
                             code: 500,
                             message: format!("{}", e),
@@ -489,28 +596,14 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
                     return Json(response);
                 }
             }
-            let mut tx = conn.start_transaction(TxOpts::default()).await.unwrap();
-
-            tx.exec_drop(
-                "INSERT INTO moves (game_uuid, move_number, move_position, position_black, position_white, move_date) VALUES (UUID_TO_BIN(:game_uuid), :move_number, :next_move, :position_black, :position_white, now())",
-                params! {
-                    "game_uuid" => request.game_id.clone(),
-                    "next_move" => move_to_bitmap(&request.r#move.clone().as_str()).unwrap(),
-                    "move_number" => max_move + 1,
-                    "position_black" => new_black,
-                    "position_white" => new_white,
-                },
-            ).await.unwrap();
-            tx.exec_drop(
-                "UPDATE games set position_black = :black_pos, position_white = :white_pos, end_date = NOW(), state = :new_state WHERE game_uuid = UUID_TO_BIN(:game_uuid)",
-                params! {
-                    "game_uuid" => request.game_id.clone(),
-                    "black_pos" => new_black,
-                    "white_pos" => new_white,
-                    "new_state" => next_state
-                }
-            ).await.unwrap();
-            match tx.commit().await {
+            match game_repo
+                .update_game_with_move(
+                    &game,
+                    move_to_bitmap(&request.r#move.clone().as_str()).unwrap(),
+                    max_move + 1,
+                )
+                .await
+            {
                 Ok(_) => {
                     let result: MoveResult = MoveResult {
                         ok: true,
@@ -528,13 +621,14 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
                     return Json(response);
                 }
                 Err(e) => {
+                    println!("Error while updating move: {}", e);
                     let result: MoveResult = MoveResult {
                         ok: false,
                         r#continue: true,
                         winner: String::new(),
                     };
                     let response: MoveResponse = MoveResponse {
-                        status: "ok".to_string(),
+                        status: "error".to_string(),
                         error: ResponseError {
                             code: 500,
                             message: format!("{}", e),
@@ -546,6 +640,7 @@ async fn game_move(pool: &State<Pool>, request: Json<MoveRequest>) -> Json<MoveR
             }
         }
         Err(e) => {
+            println!("Error applying move {}: {}", request.r#move, e);
             let result: MoveResult = MoveResult {
                 ok: false,
                 r#continue: true,
@@ -602,10 +697,11 @@ async fn main() {
 mod tests {
     use super::*;
     use dotenv::dotenv;
-    use mysql_async::{OptsBuilder, Pool};
-    use rocket::{http::Status, local::asynchronous::Client};
+    use mysql_async::{params, Conn, OptsBuilder, Pool, Row};
+    use rocket::{http::Status, local::asynchronous::Client, State};
     use serde_json::json;
     use std::env;
+    use tokio::runtime::Runtime;
     use uuid::Uuid;
 
     #[tokio::test]

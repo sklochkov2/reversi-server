@@ -1,5 +1,15 @@
 use rocket::serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Game {
+    pub game_uuid: String,
+    pub black_uuid: String,
+    pub white_uuid: String,
+    pub position_black: u64,
+    pub position_white: u64,
+    pub state: u64,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ResponseError {
     pub code: u32,
