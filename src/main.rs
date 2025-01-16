@@ -152,23 +152,40 @@ async fn create_game(pool: &State<Pool>, request: Json<NewGameRequest>) -> Json<
 #[post("/game_list", format = "json", data = "<request>")]
 async fn game_list(pool: &State<Pool>, request: Json<NewGameRequest>) -> Json<GameListResponse> {
     // TODO(1): add player validation
-    let mut conn = pool.get_conn().await.unwrap();
-    let games: Vec<AvailableGame> = conn
-        .exec_map(
-            "SELECT
-          bin_to_uuid(game_uuid) as game_id,
-          IFNULL(bin_to_uuid(black_uuid), bin_to_uuid(white_uuid)) as first_player
-         FROM games 
-         WHERE state = 0 AND IFNULL(bin_to_uuid(black_uuid), bin_to_uuid(white_uuid)) <> ?
-         ORDER BY start_date ASC",
-            (request.player_id.clone(),),
-            |(game_id, first_player)| AvailableGame {
-                game_id,
-                first_player,
-            },
-        )
-        .await
-        .unwrap();
+    let game_repo = MySqlGameRepository::new(pool.inner().clone());
+    let games: Vec<Game>;
+    match game_repo.pending_games(request.player_id.clone()).await {
+        Ok(g) => {
+            games = g;
+        }
+        Err(e) => {
+            let result: Vec<AvailableGame> = Vec::new();
+            let response: GameListResponse = GameListResponse {
+                status: "error".to_string(),
+                error: ResponseError {
+                    code: 500,
+                    message: format!("{}", e),
+                },
+                result: result,
+            };
+            return Json(response);
+        }
+    }
+
+    let mut result: Vec<AvailableGame> = Vec::new();
+    for game in games {
+        if game.white_uuid != "".to_string() {
+            result.push(AvailableGame {
+                game_id: game.game_uuid,
+                first_player: game.white_uuid,
+            });
+        } else {
+            result.push(AvailableGame {
+                game_id: game.game_uuid,
+                first_player: game.black_uuid,
+            });
+        }
+    }
 
     let response: GameListResponse = GameListResponse {
         status: "ok".to_string(),
@@ -176,7 +193,7 @@ async fn game_list(pool: &State<Pool>, request: Json<NewGameRequest>) -> Json<Ga
             code: 200,
             message: "".to_string(),
         },
-        result: games,
+        result: result,
     };
     Json(response)
 }

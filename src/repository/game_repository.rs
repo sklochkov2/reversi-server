@@ -14,6 +14,7 @@ pub enum RepositoryError {
 
 #[async_trait]
 pub trait GameRepository {
+    async fn pending_games(&self, player_uuid: String) -> Result<Vec<Game>, RepositoryError>;
     async fn get_game(&self, game_uuid: &str) -> Result<Option<Game>, RepositoryError>;
     async fn get_max_move_no(&self, game_uuid: &str) -> Result<u64, RepositoryError>;
     async fn get_last_move(&self, game_uuid: &str) -> Result<u64, RepositoryError>;
@@ -266,6 +267,40 @@ impl GameRepository for MySqlGameRepository {
 
         Ok(())
     }
+
+    async fn pending_games(&self, player_uuid: String) -> Result<Vec<Game>, RepositoryError> {
+        let mut conn = self
+            .pool
+            .get_conn()
+            .await
+            .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+        let games: Vec<Game> = conn
+            .exec_map(
+                "SELECT
+                bin_to_uuid(game_uuid) as game_uuid,
+                IFNULL(BIN_TO_UUID(black_uuid), '') AS black_uuid,
+                IFNULL(BIN_TO_UUID(white_uuid), '') AS white_uuid,
+                position_black,
+                position_white,
+                state
+            FROM games
+            WHERE state = 0 AND IFNULL(bin_to_uuid(black_uuid), bin_to_uuid(white_uuid)) <> ?
+            ORDER BY start_date ASC",
+                (player_uuid.clone(),),
+                |(game_uuid, black_uuid, white_uuid, position_black, position_white, state)| Game {
+                    game_uuid,
+                    black_uuid,
+                    white_uuid,
+                    position_black,
+                    position_white,
+                    state,
+                },
+            )
+            .await
+            .map_err(|e| RepositoryError::DatabaseError(e.to_string()))?;
+
+        Ok(games)
+    }
 }
 
 impl MySqlGameRepository {
@@ -356,5 +391,10 @@ impl GameRepository for MockGameRepository {
         _move_no: u64,
     ) -> Result<(), RepositoryError> {
         Ok(())
+    }
+
+    async fn pending_games(&self, _player_uuid: String) -> Result<Vec<Game>, RepositoryError> {
+        let games: Vec<Game> = Vec::new();
+        Ok(games)
     }
 }
