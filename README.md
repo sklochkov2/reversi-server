@@ -22,7 +22,7 @@ The basic response structure looks like the following:
 |Request URI             |Method|Request JSON                 |Result JSON                    |
 |------------------------|------|-----------------------------|-------------------------------|
 |/reversi/v1/create_game |POST  |`{"player_id": "<uuid>"}`    |`{"game_id": "<uuid>", "color": "white|black"}`|
-|/reversi/v1/game_list|POST|`{"player_id": "<uuid>"}`|`{"game_list": [{"game_id": "<uuid>","first_player": "<uuid>"}]`|
+|/reversi/v1/game_list|POST|`{"player_id": "<uuid>"}`|`[{"game_id": "<uuid>","first_player": "<uuid>"}]`|
 |/reversi/v1/game_status|POST|`{"player_id": "<uuid>", "game_id": "<uuid>"}`|`{"status": enum("pending","white", "black", "white_won", "black_won", "last_move": "(empty string or last move in algebraic)")}`|
 |/reversi/v1/move|POST|`{"player_id": "<uuid>", "game_id": "<uuid>", "move": "<letter><number>"}` or `{"player_id": "<uuid>", "game_id": "<uuid>", "move": "resign/pass"}`|`{"ok": "true","continue": "true","winner": ""}`|
 |/reversi/v1/join|POST|`{"player_id": "<uuid>", "game_id": "<uuid>"}`|`{"result": bool, "color": "white/black"}`|
