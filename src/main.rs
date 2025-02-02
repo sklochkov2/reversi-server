@@ -4,13 +4,14 @@ extern crate rocket;
 use std::env;
 use uuid::Uuid;
 
-use mysql_async::{prelude::*, Opts, Pool};
+use mysql_async::{Opts, Pool};
 use reversi_tools::position::*;
 use rocket::serde::json::Json;
 use rocket::State;
 
 mod repository;
-use repository::game_repository::{GameRepository, MySqlGameRepository};
+use repository::game_repository::*;
+use repository::player_repository::*;
 
 mod model;
 use model::*;
@@ -27,30 +28,34 @@ fn random_upto(n: usize) -> usize {
 
 #[get("/players")]
 async fn get_users(pool: &State<Pool>) -> Json<PlayerResponse> {
-    // TODO: implement player repository
-    let mut conn = pool.get_conn().await.unwrap();
+    let player_repo = MySqlPlayerRepository::new(pool.inner().clone());
 
-    let users: Vec<User> = conn
-        .query_map(
-            "SELECT bin_to_uuid(player_uuid) as player_uuid, comment FROM players",
-            |(player_uuid, comment)| User {
-                player_uuid,
-                comment,
-            },
-        )
-        .await
-        .unwrap();
+    match player_repo.player_list().await {
+        Ok(p) => {
+            let response: PlayerResponse = PlayerResponse {
+                status: "ok".to_string(),
+                error: ResponseError {
+                    code: 200,
+                    message: "".to_string(),
+                },
+                result: p,
+            };
 
-    let response: PlayerResponse = PlayerResponse {
-        status: "ok".to_string(),
-        error: ResponseError {
-            code: 200,
-            message: "".to_string(),
-        },
-        result: users,
-    };
+            return Json(response);
+        }
+        Err(e) => {
+            let response: PlayerResponse = PlayerResponse {
+                status: "error".to_string(),
+                error: ResponseError {
+                    code: 500,
+                    message: format!("Error while getting user list: {}", e),
+                },
+                result: Vec::new(),
+            };
 
-    Json(response)
+            return Json(response);
+        }
+    }
 }
 
 #[post("/create_game", format = "json", data = "<request>")]

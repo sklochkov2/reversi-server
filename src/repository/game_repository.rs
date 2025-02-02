@@ -4,13 +4,7 @@ use mysql_async::{params, prelude::*, Pool, TxOpts};
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-#[derive(Debug, thiserror::Error)]
-pub enum RepositoryError {
-    #[error("Database error: {0}")]
-    DatabaseError(String),
-    #[error("Other error: {0}")]
-    Other(String),
-}
+use crate::repository::db_errors::*;
 
 #[async_trait]
 pub trait GameRepository {
